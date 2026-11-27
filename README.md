@@ -7,28 +7,33 @@ bind 的 TCP/UDP 端口，自动在 nftables（首选）或 iptables 里放行�
 ## 原理
 
 - 读 `/proc/<pid>/fd/*` 拿到进程持有的 socket inode
-- 与 `/proc/net/{tcp,tcp6,udp,udp6}` 按 inode 匹配，取本地端口
+- 与 `/proc/net/{tcp,tcp6,udp,udp6}` 按 inode 匹配，解析本地 IP 与端口：
+  - 仅绑定回环地址（`127.0.0.0/8`、`::1`、`::ffff:127.0.0.0/104`）的端口不对外开放；显式绑定 `0.0.0.0`、`::` 或非回环网卡地址时开放对应 4 层端口
+  - 按地址族区分 IPv4 / IPv6（`::` 在 `net.ipv6.bindv6only=0` 下按双栈放行 IPv4+IPv6）
 - TCP 只认 LISTEN；UDP 认绑定的非临时端口（读
   `/proc/sys/net/ipv4/ip_local_port_range` 过滤客户端随机源端口，不会误放行）
-- 每次轮询对期望端口集合做 diff，只有变化才重建规则；规则放在独立的
-  `table inet afw` 里，不碰系统已有防火墙配置
-- 收到 SIGINT/SIGTERM、或 PID 模式下进程退出 → 自动清空全部 afw 规则
+- 每次轮询对期望端口集合做 diff，只有变化才原子更新本单元独立的防火墙子链（`afw_<单元名>`），
+  并挂载到现有 `input` 过滤链头部，不碰系统已有规则、多单元互不干扰
+- 收到 SIGINT/SIGTERM、或 PID 模式下进程退出 → 自动清空本单元全部 afw 规则
 
 ## 用法
 
 ```sh
-sudo ./afw -n nginx              # 按进程名监视（可匹配多个实例）
-sudo ./afw -p 12345              # 按 PID 监视
-sudo ./afw -s nginx              # 监视 systemd 服务 cgroup 内全部进程（含子 cgroup）
-sudo ./afw -s user@1000.service  # --user 服务也支持（自动 systemctl 定位 cgroup）
-sudo ./afw -n dnsmasq -i 2       # 2 秒轮询
-sudo ./afw -n myapp -b iptables  # 强制用 iptables 后端
-sudo ./afw -n myapp --dry-run    # 只打印将执行的命令，不动防火墙
-sudo ./afw -n myapp --once       # 应用一次就退出（配合 cron/外部编排）
+sudo ./afw -n nginx                  # 按进程名监视（可匹配多个实例）
+sudo ./afw -n nginx --with-fork      # 同时递归跟踪 fork 出的子孙进程
+sudo ./afw -p 12345                  # 按 PID 监视
+sudo ./afw -p 12345 --with-fork      # 按 PID 监视并跟踪其 fork 子孙进程
+sudo ./afw -s nginx                  # 监视 systemd 服务 cgroup 内全部进程（含子 cgroup）
+sudo ./afw -s user@1000.service      # --user 服务也支持（自动 systemctl 定位 cgroup）
+sudo ./afw -n dnsmasq -i 0.5         # 0.5 秒轮询（支持小数，最低 0.1）
+sudo ./afw -n myapp -b iptables      # 强制用 iptables/ip6tables 后端
+sudo ./afw -n myapp --dry-run        # 只打印将执行的命令，不动防火墙
+sudo ./afw -n myapp --once           # 应用一次就退出（配合 cron/外部编排）
 ```
 
-需要 root（修改防火墙需要 CAP_NET_ADMIN）。进程名匹配 `/proc/*/comm` 或
-可执行文件名，精确匹配。
+需要 root（修改防火墙需要 CAP_NET_ADMIN）。进程名匹配 `/proc/*/comm`、
+`/proc/*/exe` 可执行文件名或 `argv[0]` 文件名，精确匹配；`-p`/`-n` 默认仅监视
+目标进程本身，加 `--with-fork` 可递归跟踪其 fork 出来的子孙进程。
 
 ## 构建
 
@@ -74,10 +79,11 @@ afw 刻意避开 eBPF，换来的是极宽的运行环境覆盖——本质上�
 # /etc/afw.d/nginx.conf  （afw -s nginx --gen 自动生成）
 service = nginx        # 三选一：service（systemd 服务 cgroup 内全部进程）
                        #         name（按进程名，可多实例）/ pid（单个 PID）
-interval = 1           # 轮询间隔（秒），检测延迟 = 该值
+interval = 1           # 轮询间隔（秒，支持小数如 0.5），检测延迟 = 该值
 backend = nft          # nft | iptables | auto
 udp_mode = server      # server = 过滤临时端口范围内的 UDP 绑定（默认）
                        # all    = 放行全部 UDP 绑定
+with_fork = false      # 是否递归跟踪 fork 子孙进程（pid/name 模式生效）
 ```
 
 **为什么有些 UDP 端口"看不见"**：`/proc` 无法区分"服务端 bind"和"客户端出站

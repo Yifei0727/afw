@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::{Target, UnitConf, BIN_PATH, CONF_DIR, UNIT_TEMPLATE};
+use crate::config::{UnitConf, BIN_PATH, CONF_DIR, UNIT_TEMPLATE};
 use crate::log;
 
 const UNIT_BODY: &str = "\
